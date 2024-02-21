@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "@types/lodash": "^4.14.202",
+    "@types/ws": "^8.5.10",
+    "lodash": "^4.17.21",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3",
+    "ws": "^8.16.0"
+  },
+  "scripts": {
+    "start": "ts-node src/main.ts"
+  }
+}
