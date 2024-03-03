@@ -1,12 +1,15 @@
 import { clone, maxBy, sortBy, values } from 'lodash'
-import { Direction, MOVE_MS, MapIcon, MapInstance, MessageFromPlayer, MessageFromServer, PlayerIcon, PlayerJson, TileJson } from '../common/game'
+import { Direction, MOVE_MS, MapIcon, MapInstance, MessageFromPlayer, MessageFromServer, PlayerIcon, PlayerJson, Pos, TileJson } from '../common/game'
 export class Client {
     ws: WebSocket
     state?: {
         start_at: number
+        player_id: number
         map: MapInstance
         players: PlayerJson[]
         last_update_time: number
+        timeout: number
+        game_over?: MessageFromServer['GameOver']
     }
     ts = 0
     draw_int = 0
@@ -35,6 +38,7 @@ export class Client {
     }
 
     constructor(
+        public player_name: string,
         public host: string,
         public map_canvas: HTMLCanvasElement,
         public game_canvas: HTMLCanvasElement,
@@ -42,10 +46,13 @@ export class Client {
         this.ws = new WebSocket(host);
         this.ws.onopen = () => {
             this.sendPing()
+            this.send({
+                SetName: this.player_name
+            })
         }
         const ping_int = setInterval(() => {
             this.sendPing()
-        }, 1000);
+        }, 100);
 
         this.ws.onclose = () => {
             clearInterval(ping_int)
@@ -69,12 +76,17 @@ export class Client {
             if (message.Init) {
                 this.state = {
                     map: new MapInstance(message.Init.map),
+                    player_id: message.Init.player_id,
                     players: message.Init.players,
+                    timeout: message.Init.timeout,
                     start_at: Date.now() - message.Init.time,
                     last_update_time: 0
                 }
                 this.adjustTileSize()
                 this.drawMap()
+            }
+            if (message.GameOver && this.state) {
+                this.state.game_over = message.GameOver
             }
             if (this.state && message.Update) {
                 if (message.Update.time >= this.state.last_update_time) {
@@ -180,6 +192,15 @@ export class Client {
             )
         }
     }
+    get player() {
+        return this.state?.players.find(x => x.id == this.state?.player_id)
+    }
+    get team() {
+        return this.player?.is_hiding ? 'hider' : 'chaser'
+    }
+    currentPlayerPos(player: PlayerJson) {
+
+    }
     drawPlayer(ctx: CanvasRenderingContext2D, size: number, player: PlayerJson) {
         let pos = player.pos
 
@@ -196,10 +217,21 @@ export class Client {
             pos.y += (player.move.end.y - pos.y) * percent
         }
 
+        const draw_name = (pos: Pos) => {
+            ctx.fillStyle = '30px #fff'
+            ctx.font = size * .4 + "px monospace";
+            ctx.textAlign = 'center'
+            ctx.fillText(player.name ?? player.id.toFixed(5), (pos.x + .5) * size, (pos.y + 1.3) * size)
+        }
         if (player.is_hiding) {
-            return this.drawTile(ctx, size, {
-                pos, icon: player.is_hiding
-            })
+            if (!player.is_dead) {
+                this.drawTile(ctx, size, {
+                    pos, icon: player.is_hiding
+                })
+                if (this.team == 'hider' || player.move?.time) {
+                    draw_name(pos)
+                }
+            }
         } else {
             // if (!this._) {
             //     this._ = true
@@ -212,6 +244,8 @@ export class Client {
                 c[0], c[1], c[2], c[3],
                 ((pos.x - .5) * size), ((pos.y - 1) * size), size * 2, size * 2,
             )
+            draw_name(pos)
+
             // ctx.drawImage(player_sprites[player.skin].image,
             //     c[0], c[1], c[2], c[3],
             //     pos.x * size, pos.y * size, size, size,

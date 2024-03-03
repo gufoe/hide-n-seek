@@ -6,6 +6,9 @@ export function sleep(ms: number) {
 export function log(...args: any[]) {
     console.log(Math.floor(Date.now()), ...args)
 }
+export function pick<T>(x: Array<T>): T {
+    return x[Math.floor(x.length * Math.random())]
+}
 
 export function applyNetworkDelay(do_send: CallableFunction) {
     if (NETWORK_GITTER || NETWORK_DELAY) {

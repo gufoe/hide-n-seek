@@ -1,13 +1,13 @@
-import { random } from "lodash";
-import { Direction, TPS, MapInstance, MessageFromPlayer, MessageFromServer, PlayerJson, Pos, MOVE_MS, MAP_SIZE, NETWORK_GITTER, NETWORK_DELAY, PLAYER_ICONS } from "./common/game";
+import { isFunction, random } from "lodash";
+import { Direction, TPS, MapInstance, MessageFromPlayer, MessageFromServer, PlayerJson, Pos, MOVE_MS, MAP_SIZE, NETWORK_GITTER, NETWORK_DELAY, PLAYER_ICONS, PlayerID, MapIcon, MAP_ICONS, randomPlayerTile } from "./common/game";
 import WebSocket, { WebSocketServer } from 'ws';
-import { applyNetworkDelay, log, sleep } from './common/utils'
+import { applyNetworkDelay, log, pick, sleep } from './common/utils'
 import { GAME_TIMEOUT } from "./common/game";
 
 
 export class Server {
     map?: MapInstance
-    players: Player[] = []
+    players: Map<PlayerID, Player> = new Map
     private last_update?: string
     start_at = 0
 
@@ -28,7 +28,7 @@ export class Server {
         this.log('Send init')
 
         // Send init message to all players
-        this.broadcast(this.getInitMessage())
+        this.broadcast(p => this.getInitMessage(p))
 
 
         this.log('Start loop')
@@ -41,25 +41,41 @@ export class Server {
 
             if (!this.isPlaying()) {
                 this.log('Game is dead, stop')
-                return
+                break
             }
         }
+
+        const winners = this.players_arr.some(p => p.json.is_hiding && !p.json.is_dead) ? true : false
+
+        this.broadcast({
+            GameOver: {
+                winners: this.players_arr.filter(p => (winners == !!p.json.is_hiding)).map((p => p.id))
+            }
+        })
+        await sleep(4000)
+    }
+
+    get players_arr() {
+        return [...this.players.values()]
     }
 
     isPlaying() {
-        return this.players.some(p => p.json.is_hiding && !p.json.is_dead)
-            || !this.players.some(p => p.json.is_hiding)
+        return this.players_arr.some(p => p.json.is_hiding && !p.json.is_dead)
+            || !this.players_arr.some(p => p.json.is_hiding)
     }
 
     private reset() {
         // Reset map
         this.map = MapInstance.generate({
-            clutter: 0.2,
+            clutter: 0.02,
             size: MAP_SIZE,
         })
         // Reset players
-        this.players.forEach(pl => {
-            pl.json = this.randomPlayerJson()
+        this.players_arr.forEach(pl => {
+            pl.json = this.randomPlayerJson({
+                name: pl.json.name,
+                id: pl.json.id,
+            })
         })
 
         this.start_at = performance.now()
@@ -72,7 +88,7 @@ export class Server {
         return this.map?.get(pos)?.icon == 'grass'
     }
     getPlayers(pos: Pos): Player[] {
-        return this.players.filter(pl =>
+        return this.players_arr.filter(pl =>
             Math.abs(pl.json.pos.x - pos.x) < 0.1
             && Math.abs(pl.json.pos.y - pos.y) < 0.1)
     }
@@ -80,7 +96,7 @@ export class Server {
 
     async update() {
         // Update player positions that have been moving for enough time
-        this.players.forEach(pl => {
+        this.players_arr.forEach(pl => {
             pl.updatePositionAndEat()
         })
 
@@ -89,7 +105,7 @@ export class Server {
     }
 
     sendUpdate() {
-        const players = this.players.map(p => p.json)
+        const players = this.players_arr.map(p => p.json)
         if (!this.last_update || this.last_update != JSON.stringify(players)) {
             this.last_update = JSON.stringify(players)
             this.broadcast({
@@ -101,8 +117,8 @@ export class Server {
         }
     }
 
-    async broadcast(message: MessageFromServer) {
-        this.players.forEach(pl => pl.send(message))
+    async broadcast(message: ((player: Player) => MessageFromServer) | MessageFromServer) {
+        this.players_arr.forEach(pl => pl.send(message))
     }
 
     async onJoin(socket: WebSocket) {
@@ -112,37 +128,40 @@ export class Server {
         }
         this.log('player joininig')
 
-        const player = new Player(this, socket, this.randomPlayerJson())
-        this.players.push(player)
-        player.send(this.getInitMessage())
-
+        const player = new Player(this, socket, this.randomPlayerJson({}))
+        this.players.set(player.id, player)
+        player.send(p => this.getInitMessage(p))
         const ping_int = setInterval(() => {
             player.send({ GetTime: { a: this.time() } })
         }, 1000);
 
         socket.on('close', () => {
             this.log('player disconnected')
-            const i = this.players.indexOf(player)
-            this.players.splice(i, 1)
+            const i = this.players.delete(player.id)
             clearInterval(ping_int)
         })
     }
 
-    getInitMessage(): MessageFromServer {
+    getInitMessage(player: Player): MessageFromServer {
         if (!this.map) throw Error
         return {
             Init: {
+                timeout: GAME_TIMEOUT,
+                player_id: player.id,
                 time: this.time(),
                 map: this.map.json,
-                players: this.players.map(p => p.json),
+                players: this.players_arr.map(p => p.json),
             }
         }
     }
 
-    randomPlayerJson(): PlayerJson {
+    randomPlayerJson(props: Partial<PlayerJson>): PlayerJson {
         if (!this.map) throw Error
-        const is_hiding = Math.random() > 0.5 ? 'bush' : undefined
-        return {
+        const hiders = this.players_arr.reduce((a, p) => a + (p.json.is_hiding ? 1 : 0), 0)
+        const force_hider = hiders == 0 && this.players_arr.length
+        const is_hiding: MapIcon | undefined = force_hider || Math.random() > .5 ? randomPlayerTile() : undefined
+        return Object.assign({
+            id: Math.random(),
             dir: 'up',
             is_hiding,
             skin: PLAYER_ICONS[Math.floor(Math.random() * PLAYER_ICONS.length)],
@@ -152,7 +171,7 @@ export class Server {
                 x: random(0, this.map.size.x - 1, false),
                 y: random(0, this.map.size.y - 1, false),
             }
-        }
+        } as PlayerJson, props)
     }
 }
 
@@ -171,8 +190,12 @@ class Player {
         })
     }
 
-    send(message: MessageFromServer) {
-        this.socket.send(JSON.stringify(message))
+    get id() {
+        return this.json.id
+    }
+
+    send(message: MessageFromServer | ((player: Player) => MessageFromServer)) {
+        this.socket.send(JSON.stringify(isFunction(message) ? message(this) : message))
     }
 
 
