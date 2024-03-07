@@ -198,9 +198,6 @@ export class Client {
     get team() {
         return this.player?.is_hiding ? 'hider' : 'chaser'
     }
-    currentPlayerPos(player: PlayerJson) {
-
-    }
     drawPlayer(ctx: CanvasRenderingContext2D, size: number, player: PlayerJson) {
         let pos = player.pos
 
